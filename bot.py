@@ -6,10 +6,10 @@ from aiogram import Bot, Dispatcher, F
 from aiogram.enums import ParseMode
 from aiogram.client.default import DefaultBotProperties
 from aiogram.filters import CommandStart, Command
-from aiogram.types import Message
+from aiogram.types import Message, ReplyKeyboardMarkup, KeyboardButton
 
 import config
-from database import init_db, create_appeal
+from database import init_db, create_appeal, set_user_state, get_user_state
 
 # Настройка логирования
 logging.basicConfig(
@@ -29,17 +29,44 @@ else:
 dp = Dispatcher()
 
 
-# ===================== ОБРАБОТЧИКИ КОМАНД =====================
+# ===================== КЛАВИАТУРЫ =====================
+
+def get_main_keyboard() -> ReplyKeyboardMarkup:
+    """Главная клавиатура бота."""
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text="📝 Подать жалобу")],
+            [KeyboardButton(text="ℹ️ Как это работает")]
+        ],
+        resize_keyboard=True
+    )
+
+
+def get_cancel_keyboard() -> ReplyKeyboardMarkup:
+    """Клавиатура с кнопкой отмены в режиме ввода жалобы."""
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text="❌ Отмена")]
+        ],
+        resize_keyboard=True
+    )
+
+
+# ===================== ОБРАБОТЧИКИ КОМАНД И КНОПОК =====================
 
 @dp.message(CommandStart(), F.chat.type == "private")
 async def cmd_start(message: Message):
     """Приветственное сообщение при старте бота."""
+    user_id = message.from_user.id if message.from_user else 0
+    await asyncio.to_thread(set_user_state, user_id, None)
+
     welcome_text = (
-        "Привет! Это анонимный бот оперотряда общежития.\n\n"
-        "Здесь ты можешь сообщить о проблеме, нарушении или оставить жалобу. "
-        "Мы рассмотрим обращение."
+        "👋 <b>Привет! Это анонимный бот оперотряда общежития.</b>\n\n"
+        "Здесь ты можешь сообщить о нарушении, проблеме или происшествии. "
+        "Все обращения передаются строго анонимно: твоё имя, username и ID нигде не раскрываются.\n\n"
+        "👇 <b>Чтобы отправить обращение, нажми кнопку «📝 Подать жалобу» ниже.</b>"
     )
-    await message.answer(welcome_text)
+    await message.answer(welcome_text, reply_markup=get_main_keyboard())
 
 
 @dp.message(Command("id", "getid"))
@@ -66,32 +93,76 @@ async def cmd_get_id(message: Message):
     await message.answer(response)
 
 
+@dp.message(F.text.in_({"ℹ️ Как это работает", "Помощь"}), F.chat.type == "private")
 @dp.message(Command("help"), F.chat.type == "private")
 async def cmd_help(message: Message):
     """Справка по использованию бота."""
     help_text = (
         "ℹ️ <b>Как пользоваться ботом:</b>\n\n"
-        "1. Просто отправьте любое текстовое сообщение, фото, видео или документ в этот чат.\n"
-        "2. Бот автоматически зарегистрирует ваше обращение и анонимно перешлет его оперотряду.\n"
-        "3. Ваши личные данные (имя, логин, ID) нигде не отображаются — обращение на 100% анонимно.\n\n"
-        "Для повторного вызова начального сообщения используйте /start."
+        "1. Нажмите кнопку <b>«📝 Подать жалобу»</b> (или команду /complaint).\n"
+        "2. Отправьте описание ситуации, фото, видео или документ.\n"
+        "3. Бот зарегистрирует обращение под уникальным номером и анонимно передаст оперотряду.\n"
+        "4. Ваши личные данные <b>100% скрыты</b> — никто не узнает автора жалобы."
     )
-    await message.answer(help_text)
+    await message.answer(help_text, reply_markup=get_main_keyboard())
+
+
+@dp.message(F.text == "❌ Отмена", F.chat.type == "private")
+@dp.message(Command("cancel"), F.chat.type == "private")
+async def cmd_cancel(message: Message):
+    """Отмена текущего ввода жалобы."""
+    user_id = message.from_user.id if message.from_user else 0
+    await asyncio.to_thread(set_user_state, user_id, None)
+
+    await message.answer(
+        "🚫 <b>Подача жалобы отменена.</b>\nЕсли захотите отправить обращение позже, просто нажмите кнопку ниже.",
+        reply_markup=get_main_keyboard()
+    )
+
+
+@dp.message(F.text == "📝 Подать жалобу", F.chat.type == "private")
+@dp.message(Command("complaint", "report", "appeal"), F.chat.type == "private")
+async def cmd_make_complaint(message: Message):
+    """Переход в режим ожидания жалобы от пользователя."""
+    user_id = message.from_user.id if message.from_user else 0
+    await asyncio.to_thread(set_user_state, user_id, "waiting_for_complaint")
+
+    prompt_text = (
+        "✍️ <b>Опишите суть вашей жалобы:</b>\n\n"
+        "Укажите важные детали (номер комнаты, этаж, что произошло).\n"
+        "Вы также можете отправить <b>фото, видео, голосовое сообщение или файл</b>.\n\n"
+        "<i>Следующее ваше сообщение будет анонимно передано дежурным оперотряда.</i>\n"
+        "<i>(Если передумали — нажмите кнопку «❌ Отмена» ниже)</i>"
+    )
+    await message.answer(prompt_text, reply_markup=get_cancel_keyboard())
 
 
 # ================== ПРИЕМ И ОБРАБОТКА ОБРАЩЕНИЙ ==================
 
 @dp.message(F.chat.type == "private")
-async def handle_complaint(message: Message):
+async def handle_private_message(message: Message):
     """
-    Принимает любое сообщение (текст, фото, видео, голосовое, документ и т.д.)
-    в личном чате как анонимную жалобу.
+    Обрабатывает входящие сообщения в личном чате.
+    Если пользователь нажал «Подать жалобу» — принимает обращение.
+    Иначе — предлагает воспользоваться кнопкой.
     """
+    user_id = message.from_user.id if message.from_user else 0
+    state = await asyncio.to_thread(get_user_state, user_id)
+
+    # Если пользователь НЕ нажимал "Подать жалобу"
+    if state != "waiting_for_complaint":
+        await message.answer(
+            "👋 Чтобы отправить анонимное обращение оперативному отряду, "
+            "нажмите кнопку <b>«📝 Подать жалобу»</b> ниже 👇",
+            reply_markup=get_main_keyboard()
+        )
+        return
+
+    # Пользователь находится в режиме подачи жалобы:
     content_type = message.content_type
     preview_text = message.text or message.caption or f"[{content_type}]"
 
-    # Сохраняем в базу данных в отдельном потоке
-    user_id = message.from_user.id if message.from_user else 0
+    # Регистрируем жалобу в базе
     appeal_id = await asyncio.to_thread(
         create_appeal,
         user_id,
@@ -99,13 +170,13 @@ async def handle_complaint(message: Message):
         preview_text[:200]
     )
 
+    # Сбрасываем состояние пользователя обратно
+    await asyncio.to_thread(set_user_state, user_id, None)
+
     now_str = datetime.now().strftime("%d.%m.%Y в %H:%M")
+    logger.info(f"Получено новое обращение #{appeal_id:04d} (тип: {content_type})")
 
-    logger.info(
-        f"Получено новое обращение #{appeal_id:04d} от пользователя (тип: {content_type})"
-    )
-
-    # Если настроена группа — пересылаем анонимно туда
+    # Пересылаем в группу оперотряда
     if config.GROUP_CHAT_ID:
         try:
             header = (
@@ -114,51 +185,39 @@ async def handle_complaint(message: Message):
                 f"🔒 <i>Статус: Анонимно</i>\n"
                 f"────────────────────────"
             )
-            # Отправляем шапку
             await bot.send_message(
                 chat_id=config.GROUP_CHAT_ID,
                 text=header
             )
-
-            # Копируем сообщение без раскрытия автора
             await bot.copy_message(
                 chat_id=config.GROUP_CHAT_ID,
                 from_chat_id=message.chat.id,
                 message_id=message.message_id
             )
-            logger.info(f"Обращение #{appeal_id:04d} успешно отправлено в группу {config.GROUP_CHAT_ID}")
+            logger.info(f"Обращение #{appeal_id:04d} переслано в группу {config.GROUP_CHAT_ID}")
         except Exception as e:
-            logger.error(f"Ошибка при отправке обращения в группу: {e}")
+            logger.error(f"Ошибка при пересылке обращения в группу: {e}")
     else:
-        logger.warning(
-            f"GROUP_CHAT_ID не настроен в .env! Обращение #{appeal_id:04d} сохранено в базу данных."
-        )
+        logger.warning(f"GROUP_CHAT_ID не настроен! Обращение #{appeal_id:04d} сохранено в базу данных.")
 
-    # Красивое ответное сообщение пользователю
+    # Подтверждение пользователю
     confirmation_text = (
         "🛡️ <b>Обращение принято!</b>\n\n"
         f"Ваша жалоба зарегистрирована под номером <b>#{appeal_id:04d}</b> "
         "и передана оперативному отряду.\n\n"
-        "🤝 <i>Спасибо за неравнодушие и помощь в поддержании порядка в общежитии! "
-        "Мы гарантируем конфиденциальность: обращение передано строго анонимно. "
-        "Ситуация обязательно будет проверена, и при необходимости мы примем меры.</i>\n\n"
-        "📌 <i>Если потребуется прикрепить фото/видео или уточнить детали — "
-        "просто отправьте их следующим сообщением.</i>"
+        "🤝 <i>Спасибо за неравнодушие! Обращение передано строго анонимно. "
+        "Ситуация будет проверена.</i>"
     )
+    await message.answer(confirmation_text, reply_markup=get_main_keyboard())
 
-    await message.answer(confirmation_text)
 
-
-# ===================== ТОЧКА ВХОДА =====================
+# ===================== ТОЧКА ВХОДА (ЛОКАЛЬНЫЙ ЗАПУСК) =====================
 
 async def main():
     await asyncio.to_thread(init_db)
     logger.info("База данных инициализирована.")
-
-    # Удаляем вебхуки и сбрасываем старые апдейты
     await bot.delete_webhook(drop_pending_updates=True)
     logger.info("Бот оперотряда запущен и ожидает обращений...")
-
     await dp.start_polling(bot)
 
 

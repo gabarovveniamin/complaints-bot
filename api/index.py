@@ -54,7 +54,7 @@ async def process_telegram_update(request: Request):
         return {"ok": True}
     except Exception as e:
         logger.error(f"Ошибка при обработке вебхука: {e}", exc_info=True)
-        return JSONResponse(status_code=500, content={"ok": False, "error": str(e)})
+        return {"ok": True, "error": str(e)}
 
 
 async def process_set_webhook(request: Request):

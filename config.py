@@ -14,5 +14,5 @@ try:
 except ValueError:
     GROUP_CHAT_ID = None
 
-if not BOT_TOKEN:
+if not BOT_TOKEN and not os.getenv("VERCEL"):
     raise ValueError("BOT_TOKEN не указан в файле .env!")

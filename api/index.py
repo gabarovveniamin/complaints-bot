@@ -1,37 +1,59 @@
 import os
+import sys
 import logging
-from contextlib import asynccontextmanager
+import traceback
+from pathlib import Path
+
+# Гарантируем, что корневая папка проекта находится в sys.path
+ROOT_DIR = Path(__file__).resolve().parent.parent
+if str(ROOT_DIR) not in sys.path:
+    sys.path.insert(0, str(ROOT_DIR))
+
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
-from aiogram.types import Update
-
-from bot import bot, dp
-from database import init_db
-import config
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Инициализируем базу данных (в /tmp на Vercel)
-init_db()
+app = FastAPI(title="Complaints Bot Webhook")
 
+init_error = None
+bot = None
+dp = None
 
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    # При старте приложения проверяем инициализацию базы
+try:
+    import config
+    from database import init_db
     init_db()
-    yield
 
+    if not config.BOT_TOKEN:
+        raise ValueError("BOT_TOKEN не найден в переменных окружения Vercel! Укажите его в Settings -> Environment Variables.")
 
-app = FastAPI(title="Complaints Bot Webhook", lifespan=lifespan)
+    from bot import bot as _bot, dp as _dp
+    from aiogram.types import Update
+    bot = _bot
+    dp = _dp
+except Exception as e:
+    init_error = f"{type(e).__name__}: {e}\n{traceback.format_exc()}"
+    logger.error(f"Ошибка инициализации: {init_error}")
 
 
 @app.get("/")
 async def root():
+    if init_error:
+        return JSONResponse(
+            status_code=500,
+            content={
+                "status": "error",
+                "message": "Ошибка инициализации бота на Vercel",
+                "details": init_error,
+                "hint": "Убедитесь, что в Vercel (Settings -> Environment Variables) добавлены BOT_TOKEN и GROUP_CHAT_ID, после чего сделан Redeploy."
+            }
+        )
     return {
         "status": "online",
         "service": "Complaints Telegram Bot",
-        "instructions": "Перейдите на /set_webhook для автоматической привязки вебхука Telegram."
+        "instructions": "Бот запущен. Если вебхук еще не настроен, откройте /set_webhook."
     }
 
 
@@ -39,7 +61,14 @@ async def root():
 @app.post("/api/webhook")
 async def telegram_webhook(request: Request):
     """Прием обновлений от серверов Telegram."""
+    if init_error or not bot or not dp:
+        return JSONResponse(
+            status_code=500,
+            content={"ok": False, "error": init_error or "Bot not initialized"}
+        )
+
     try:
+        from aiogram.types import Update
         data = await request.json()
         update = Update.model_validate(data, context={"bot": bot})
         await dp.feed_update(bot, update)
@@ -52,11 +81,17 @@ async def telegram_webhook(request: Request):
 @app.get("/set_webhook")
 @app.get("/api/set_webhook")
 async def set_webhook(request: Request):
-    """
-    Автоматическая регистрация вебхука в Telegram.
-    Достаточно открыть этот URL в браузере после деплоя.
-    """
-    # Определяем реальный домен на Vercel
+    """Автоматическая регистрация вебхука в Telegram."""
+    if init_error or not bot:
+        return JSONResponse(
+            status_code=500,
+            content={
+                "status": "error",
+                "message": "Бот не может установить вебхук из-за ошибки инициализации",
+                "details": init_error
+            }
+        )
+
     host = request.headers.get("x-forwarded-host") or request.url.netloc
     proto = request.headers.get("x-forwarded-proto", "https")
     webhook_url = f"{proto}://{host}/api/webhook"
@@ -88,6 +123,8 @@ async def set_webhook(request: Request):
 @app.get("/api/webhook_info")
 async def get_webhook_info():
     """Проверка текущего статуса вебхука."""
+    if not bot:
+        return JSONResponse(status_code=500, content={"error": init_error or "Bot not initialized"})
     try:
         info = await bot.get_webhook_info()
         return {

@@ -1,8 +1,13 @@
+import os
 import sqlite3
 from pathlib import Path
 from datetime import datetime
 
-DB_PATH = Path(__file__).resolve().parent / "appeals.db"
+# На Vercel доступен для записи только /tmp
+if os.getenv("VERCEL"):
+    DB_PATH = Path("/tmp/appeals.db")
+else:
+    DB_PATH = Path(__file__).resolve().parent / "appeals.db"
 
 def init_db():
     """Инициализация базы данных и создание таблиц."""

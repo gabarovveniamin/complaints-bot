@@ -38,29 +38,8 @@ except Exception as e:
     logger.error(f"Ошибка инициализации: {init_error}")
 
 
-@app.get("/")
-async def root():
-    if init_error:
-        return JSONResponse(
-            status_code=500,
-            content={
-                "status": "error",
-                "message": "Ошибка инициализации бота на Vercel",
-                "details": init_error,
-                "hint": "Убедитесь, что в Vercel (Settings -> Environment Variables) добавлены BOT_TOKEN и GROUP_CHAT_ID, после чего сделан Redeploy."
-            }
-        )
-    return {
-        "status": "online",
-        "service": "Complaints Telegram Bot",
-        "instructions": "Бот запущен. Если вебхук еще не настроен, откройте /set_webhook."
-    }
-
-
-@app.post("/")
-@app.post("/api/webhook")
-async def telegram_webhook(request: Request):
-    """Прием обновлений от серверов Telegram."""
+async def process_telegram_update(request: Request):
+    """Обработка вебхука от Telegram."""
     if init_error or not bot or not dp:
         return JSONResponse(
             status_code=500,
@@ -78,10 +57,8 @@ async def telegram_webhook(request: Request):
         return JSONResponse(status_code=500, content={"ok": False, "error": str(e)})
 
 
-@app.get("/set_webhook")
-@app.get("/api/set_webhook")
-async def set_webhook(request: Request):
-    """Автоматическая регистрация вебхука в Telegram."""
+async def process_set_webhook(request: Request):
+    """Установка вебхука в Telegram."""
     if init_error or not bot:
         return JSONResponse(
             status_code=500,
@@ -119,10 +96,8 @@ async def set_webhook(request: Request):
         )
 
 
-@app.get("/webhook_info")
-@app.get("/api/webhook_info")
-async def get_webhook_info():
-    """Проверка текущего статуса вебхука."""
+async def process_webhook_info():
+    """Проверка статуса вебхука."""
     if not bot:
         return JSONResponse(status_code=500, content={"error": init_error or "Bot not initialized"})
     try:
@@ -136,3 +111,35 @@ async def get_webhook_info():
         }
     except Exception as e:
         return JSONResponse(status_code=500, content={"error": str(e)})
+
+
+@app.api_route("/{path:path}", methods=["GET", "POST"])
+async def catch_all(request: Request, path: str = ""):
+    """Универсальный роут для любых путей на Vercel."""
+    if request.method == "POST":
+        return await process_telegram_update(request)
+
+    clean_path = path.lower()
+    if "set_webhook" in clean_path:
+        return await process_set_webhook(request)
+
+    if "webhook_info" in clean_path:
+        return await process_webhook_info()
+
+    if init_error:
+        return JSONResponse(
+            status_code=500,
+            content={
+                "status": "error",
+                "message": "Ошибка инициализации бота на Vercel",
+                "details": init_error,
+                "hint": "Убедитесь, что в Vercel добавлены BOT_TOKEN и GROUP_CHAT_ID в Settings -> Environment Variables."
+            }
+        )
+
+    return {
+        "status": "online",
+        "service": "Complaints Telegram Bot",
+        "path_received": path,
+        "instructions": "Бот запущен. Для настройки вебхука перейдите на /set_webhook."
+    }
